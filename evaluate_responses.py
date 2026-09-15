@@ -97,17 +97,17 @@ def _print_test_overview(results):
     console.print(table)
 
 
-def _turn_discounted_sucess(results):
+def _turn_discounted_sucess(results, base : int = 10):
     turn_discounted_sucess = 0.0
     for result in results:
         clarification_length = len(result["clarification_history"])
         if result["success"]:
-            turn_discounted_sucess += 1 / (math.log(clarification_length + 2) / math.log(2))
+            turn_discounted_sucess += math.log(base) / math.log(base + clarification_length) 
 
     return turn_discounted_sucess / len(results)
 
 
-def _turn_discounted_key_question_rate(results):
+def _turn_discounted_key_question_rate(results, base : int = 2):
     tkqr = 0.0
     for result in results:
         indicator = [e[2] == "3" for e in result["clarification_history"]]
@@ -115,7 +115,7 @@ def _turn_discounted_key_question_rate(results):
         discounted_cumulative_gain = 0.0
         idealized_cumulative_gain = 0.0
         for turn, high_quality in enumerate(indicator):
-            gain = 1 / (math.log(turn + 2) / math.log(2))
+            gain = math.log(base) / math.log(base + turn)
             if high_quality:
                 discounted_cumulative_gain += gain
             idealized_cumulative_gain += gain

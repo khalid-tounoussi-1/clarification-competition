@@ -235,9 +235,9 @@ Clarification algorithms will be scored based on a set of criteria that evaluate
 
 1. **Clarification effectiveness:** The effectiveness of the clarification algorithm is measured via `turn-discounted success` (TDS) as our core metric. TDS measures the ability to produce a correct implementation in the fewest clarification turns possible:
 
-$$\text{TDS} = \frac{1}{n} \sum^n_{i = 1} Pass_i * \frac{1}{\log_2(n_i + 2)},$$
+$$\text{TDS} = \frac{1}{n} \sum^n_{i = 1} Pass_i * \frac{1}{\log_b(b + n_i)},$$
 
-   where $Pass_i = 1$ if the i-th solution pass the developer tests and $n_i$ is the number of clarification turns. 
+   where $Pass_i = 1$ if the i-th solution pass the developer tests and $n_i$ is the number of clarification turns. The base $b$ control how much clarification turns are penalized. We default to $b = 10$ to encourage clarification.
 
 2. **Clarification quality:** The quality of the clarification in each turn is measured via an adapted version of `normalized discounted cumulative gain` (nDCG). An LLM judge decides in each clarification turn whether the clarification question was good (see criteria below), producing a hit sequence $H = (h_1, ..., h_n)$ with $h_i = 1$ for good questions and $h_i = 0$ otherwise. The dicounted cumulative gain is the computed by:
 
