@@ -4,9 +4,14 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from contextvars import ContextVar
+from contextlib import contextmanager
+from functools import wraps
+
 from clarify.llm import LanguageModel
 from clarify.runtime import EvalPlusDockerInstanceEvaluator
 
+_in_test_context: ContextVar[bool] = ContextVar("_in_test_context", default=False)
 
 @dataclass(frozen=True)
 class ClarificationConfiguration:
@@ -18,6 +23,8 @@ class ClarificationConfiguration:
     max_clarification_turns: int = 1
     max_clarification_budget: float = 1.0
     max_prompt_budget: float = 1.0
+
+    refuse_low_quality_clarification: bool = False
 
 
 class TooManyQuestionException(Exception):
@@ -77,6 +84,26 @@ Return nothing else.
 """
 
 
+@contextmanager
+def test_context():
+    """Marks the enclosed block as being inside the test context."""
+    token = _in_test_context.set(True)
+    try:
+        yield
+    finally:
+        _in_test_context.reset(token)
+
+
+def restrict_access_in_test(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if _in_test_context.get():
+            raise RuntimeError(f"Access to {func.__name__!r} is not permitted during testing.")
+
+        return func(*args, **kwargs)
+    return wrapper
+
+
 class _ClarificationEnvironment:
     def __init__(
         self,
@@ -100,6 +127,7 @@ class _ClarificationEnvironment:
         self._llm_hook = llm_api_hook
 
     @property
+    @restrict_access_in_test
     def history(self):
         return list(self._clarification_history)
 
@@ -112,6 +140,7 @@ class _ClarificationEnvironment:
         return self._config.max_prompt_budget
 
     @property
+    @restrict_access_in_test
     def clarification_cost(self):
         return self._clarify_llm.total_cost
 
@@ -198,6 +227,9 @@ class _ClarificationEnvironment:
             score, requirement_id, answer = self._parse_human_response(response)
             if requirement_id == "none" or requirement_id in seen_requirements:
                 score = "1"
+
+            if self._config.refuse_low_quality_clarification and "3" not in score:
+                answer = "Irrelevant question."
 
             self._clarification_history.append((query, requirement_id, score, answer))
             return answer

@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from clarify.baselines.base import ClarificationAlgorithmBase
 from clarify.data import load_split, preprocess_benchmark
-from clarify.env import ClarificationConfiguration, ClarificationEnvironment
+from clarify.env import ClarificationConfiguration, ClarificationEnvironment, test_context
 from clarify.utils import BatchParallelProcessor, BatchSequentialProcessor
 
 console = Console()
@@ -144,9 +144,11 @@ class SimulationFunction:
 
         try:
             with console.status(f"Run {algorithm_name} ({len(envs)} instances)..."):
-                for i, prompt_result in enumerate(
-                    clarification_algorithm.batch_run(envs, problem_definitions)
-                ):
+
+                with test_context():
+                    prompt_results = clarification_algorithm.batch_run(envs, problem_definitions)
+
+                for i, prompt_result in enumerate(prompt_results):
                     environment = envs[i]
                     results[i].update(
                         {
@@ -195,7 +197,7 @@ class SimulationFunction:
         try:
             clarification_algorithm = self._get_algorithm()
             algorithm_name = clarification_algorithm.__class__.__name__
-            with console.status(f"Run {algorithm_name}..."):
+            with test_context(), console.status(f"Run {algorithm_name}..."):
                 prompt_result = clarification_algorithm.run(environment, problem_definition)
 
             result.update(
