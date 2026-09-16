@@ -126,7 +126,6 @@ def _normalized_discounted_cumulative_gain(results, base: int = 2):
     return nDCG / len(results)
 
 
-
 def print_statistics(output_path):
     with open(output_path, "r") as lines:
         results = [json.loads(line) for line in lines]

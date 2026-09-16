@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Any
-
-from contextvars import ContextVar
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import wraps
+from typing import Any
 
 from clarify.llm import LanguageModel
 from clarify.runtime import EvalPlusDockerInstanceEvaluator
 
 _in_test_context: ContextVar[bool] = ContextVar("_in_test_context", default=False)
+
 
 @dataclass(frozen=True)
 class ClarificationConfiguration:
@@ -101,6 +101,7 @@ def restrict_access_in_test(func):
             raise RuntimeError(f"Access to {func.__name__!r} is not permitted during testing.")
 
         return func(*args, **kwargs)
+
     return wrapper
 
 

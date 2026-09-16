@@ -144,7 +144,6 @@ class SimulationFunction:
 
         try:
             with console.status(f"Run {algorithm_name} ({len(envs)} instances)..."):
-
                 with test_context():
                     prompt_results = clarification_algorithm.batch_run(envs, problem_definitions)
 
