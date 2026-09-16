@@ -107,8 +107,8 @@ def _turn_discounted_sucess(results, base: int = 10):
     return turn_discounted_sucess / len(results)
 
 
-def _turn_discounted_key_question_rate(results, base: int = 2):
-    tkqr = 0.0
+def _normalized_discounted_cumulative_gain(results, base: int = 2):
+    nDCG = 0.0
     for result in results:
         indicator = [e[2] == "3" for e in result["clarification_history"]]
 
@@ -121,9 +121,10 @@ def _turn_discounted_key_question_rate(results, base: int = 2):
             idealized_cumulative_gain += gain
 
         if idealized_cumulative_gain > 0:
-            tkqr += discounted_cumulative_gain / idealized_cumulative_gain
+            nDCG += discounted_cumulative_gain / idealized_cumulative_gain
 
-    return tkqr / len(results)
+    return nDCG / len(results)
+
 
 
 def print_statistics(output_path):
@@ -140,7 +141,7 @@ def print_statistics(output_path):
     table.add_row("Total", str(total))
 
     table.add_row("Turn Discounted Success", f"{_turn_discounted_sucess(results):.4f}")
-    table.add_row("nDCG", f"{_turn_discounted_key_question_rate(results):.4f}")
+    table.add_row("nDCG", f"{_normalized_discounted_cumulative_gain(results):.4f}")
 
     pass_at_1 = sum(r["success"] for r in results)
     table.add_row("Pass@1", f"{100 * pass_at_1 / total:.2f}")
@@ -148,7 +149,7 @@ def print_statistics(output_path):
     clarification_rate = sum(len(r["clarification_history"]) > 0 for r in results)
     table.add_row("Clarification rate", f"{100 * clarification_rate / total:.2f}%")
 
-    overask_result = [r for r in results if r.get("need_clarification", False)]
+    overask_result = [r for r in results if not r.get("need_clarification", True)]
     overasking_rate = 0.0
     if overask_result:
         overasking_rate = sum(len(r["clarification_history"]) > 0 for r in overask_result) / len(
@@ -217,12 +218,12 @@ def _compute_output_row(results):
 
     total = len(results)
     tds = _turn_discounted_sucess(results)
-    ndcg = _turn_discounted_key_question_rate(results)
+    ndcg = _normalized_discounted_cumulative_gain(results)
 
     pass_at_1 = sum(r["success"] for r in results) / total
     clarification_rate = sum(len(r["clarification_history"]) > 0 for r in results) / total
 
-    overask_result = [r for r in results if r.get("need_clarification", False)]
+    overask_result = [r for r in results if not r.get("need_clarification", False)]
     overasking_rate = 0.0
     if overask_result:
         overasking_rate = sum(len(r["clarification_history"]) > 0 for r in overask_result) / len(
