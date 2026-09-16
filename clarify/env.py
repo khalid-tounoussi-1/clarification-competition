@@ -146,7 +146,7 @@ class _ClarificationEnvironment:
         return self._clarify_llm.total_cost
 
     def can_ask(self):
-        if self.clarification_cost >= self._config.max_clarification_budget:
+        if self._clarify_llm.total_cost >= self._config.max_clarification_budget:
             return False
 
         return self._num_clarification_turns < self._config.max_clarification_turns
