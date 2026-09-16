@@ -12,13 +12,27 @@ except ImportError:
     evalplus = None
 
 
+def _check_consistency(dataset, missing_entries):
+    for example in dataset:
+        if example["task_id"] not in missing_entries:
+            continue
+
+        target = missing_entries[example["task_id"]]
+        assert example["entry_point"] == target["entry_point"], (
+            f"[{example['task_id']}] the entry point does not match ({example['entry_point']} != {target['entry_point']})"
+        )
+        assert example.get("test_cases", None) == target.get("test_cases", None), (
+            f"[{example['task_id']}] test cases doe not match."
+        )
+
+
 def init_evalplus_evaluator(dataset, train=False):
     if evalplus is None:
         raise ImportError("Install evalplus (`pip install evalplus`) to use the runtime evaluator.")
 
     dataset_ids = set(example["task_id"].split("/", 1)[0] for example in dataset)
 
-    dataset = {}
+    final_dataset = {}
     ground_truth = {}
 
     for dataset_id in dataset_ids:
@@ -32,10 +46,19 @@ def init_evalplus_evaluator(dataset, train=False):
             ds = get_human_eval_plus()
             hash = get_human_eval_plus_hash() + ("_train" if train else "")
             gt = get_groundtruth(ds, hash, [])
-        dataset.update(ds)
+        final_dataset.update(ds)
         ground_truth.update(gt)
 
-    return EvalPlusEvaluator(dataset, ground_truth)
+    # There is no EvalPlus ground truth for MBPP train set examples (default to test cases).
+    missing_entries = {
+        example["task_id"]: example
+        for example in dataset
+        if example["task_id"] not in final_dataset
+    }
+
+    _check_consistency(dataset, missing_entries)
+    final_dataset.update(missing_entries)
+    return EvalPlusEvaluator(final_dataset, ground_truth)
 
 
 class EvalPlusEvaluator:
