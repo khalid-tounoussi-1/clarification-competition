@@ -4,8 +4,8 @@ import uuid
 
 try:
     import evalplus
-    from evalplus.data import get_human_eval_plus_hash
-    from evalplus.data.mbpp import get_mbpp_plus_hash
+    from evalplus.data import get_human_eval_plus, get_human_eval_plus_hash
+    from evalplus.data.mbpp import get_mbpp_plus, get_mbpp_plus_hash
     from evalplus.eval._special_oracle import MBPP_OUTPUT_NOT_NONE_TASKS, MBPP_OUTPUT_SET_EQ_TASKS
     from evalplus.evaluate import get_groundtruth
 except ImportError:
@@ -16,21 +16,26 @@ def init_evalplus_evaluator(dataset, train=False):
     if evalplus is None:
         raise ImportError("Install evalplus (`pip install evalplus`) to use the runtime evaluator.")
 
-    dataset_deduplicated = {ex["task_id"]: ex for ex in dataset}
-    dataset_ids = set(task_id.split("/", 1)[0] for task_id in dataset_deduplicated)
+    dataset_ids = set(example["task_id"].split("/", 1)[0] for example in dataset)
+
+    dataset = {}
     ground_truth = {}
 
     for dataset_id in dataset_ids:
+        ds = {}
         gt = {}
         if dataset_id == "Mbpp":
+            ds = get_mbpp_plus()
             hash = get_mbpp_plus_hash() + ("_train" if train else "")
-            gt = get_groundtruth(dataset, hash, MBPP_OUTPUT_NOT_NONE_TASKS)
+            gt = get_groundtruth(ds, hash, MBPP_OUTPUT_NOT_NONE_TASKS)
         elif dataset_id == "HumanEval":
+            ds = get_human_eval_plus()
             hash = get_human_eval_plus_hash() + ("_train" if train else "")
-            gt = get_groundtruth(dataset, hash, [])
+            gt = get_groundtruth(ds, hash, [])
+        dataset.update(ds)
         ground_truth.update(gt)
 
-    return EvalPlusEvaluator(dataset_deduplicated, ground_truth)
+    return EvalPlusEvaluator(dataset, ground_truth)
 
 
 class EvalPlusEvaluator:
