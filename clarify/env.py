@@ -250,10 +250,11 @@ class ClarificationEnvironment:
         protected_env = _ClarificationEnvironment(*args, **kwargs)
         object.__setattr__(self, "_env", protected_env)
 
-    def __getattr__(self, name):
+    def __getattribute__(self, name):
         if name.startswith("_"):
             raise RuntimeError(f"Access to '{name}' is not permitted")
-        return getattr(self._env, name)
+        env = object.__getattribute__(self, "_env")
+        return getattr(env, name)
 
     def __setattr__(self, name, value):
         raise RuntimeError("Environment is read-only for participants")
