@@ -16,7 +16,7 @@ the user's real intent on purpose, so the clarification has to be able to overtu
 the task description outright.
 
 Team: STIL-ETS
-Team Members: Khalid Tounoussi
+Team Members: Khalid Tounoussi, Issam Oukhay
 Main Contact: khalid.tounoussi.1@ens.etsmtl.ca
 """
 
