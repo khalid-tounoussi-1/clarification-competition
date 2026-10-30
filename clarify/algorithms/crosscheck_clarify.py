@@ -4,6 +4,10 @@
 
 """CrossCheckClarification.
 
+First, a sentence or clause that cannot hold together with the rest of the requirement (an
+impossible implementation limit, numbers returned as strings, a closing "but ..." that cancels
+the main statement) is deleted, and only a verified pure deletion is kept; the user still sees
+the original text, the algorithm's own steps read the cleaned one.
 Gathers evidence before asking: three drafts are run on the examples the requirement states
 and on probe inputs. The single question states the draft's assumed contract (arguments,
 result format, rule, one example) so the user can correct whichever part is wrong; when the
@@ -21,6 +25,7 @@ Main Contact: khalid.tounoussi.1@ens.etsmtl.ca
 from __future__ import annotations
 
 import ast
+import difflib
 import io
 import json
 import re
@@ -214,6 +219,23 @@ Implementation of `{entry}`:
 Check the implementation against the user's answer, which overrides the requirement text where
 they conflict. If it follows the answer completely, reply with exactly OK. Otherwise reply with a
 corrected implementation that follows the answer (change nothing else) in one ```python block."""
+
+PRECLEAN_PROMPT = """Below is a requirement for the Python function `{entry}`. Some requirements were edited
+after they were written and now contain one sentence or clause that cannot hold together with the
+rest: an impossible implementation limit (constant time, no loops or no recursion for a task that
+must look at every element), a demand to return numbers or booleans as strings, a demand to accept
+a different kind of input than the rest describes, or a closing "but ..." / "instead ..." clause
+that cancels the main statement.
+
+If the requirement contains such a sentence or clause, reply with the requirement with exactly that
+text deleted, inside one ```text block; change nothing else, keep every example, the signature and
+the function name, and add no words. Vague wording, missing details, open choices and unusual but
+consistent demands are not contradictions; keep them. If there is nothing to delete, reply with the
+single word UNCHANGED.
+
+<requirement>
+{prompt}
+</requirement>"""
 
 ADAPTER = r"""
 
@@ -633,6 +655,72 @@ def passed_count(results) -> int:
     return sum(1 for c in results or [] if c and c[0])
 
 
+def edited(reply: str) -> str | None:
+    if not reply or reply.strip().upper().startswith("UNCHANGED"):
+        return None
+    match = re.search(r"```(?:text)?[ \t]*\n(.*?)```", reply, re.S)
+    return match.group(1).strip("\n") if match else None
+
+
+def protected_requirement_lines(text: str) -> list[str]:
+    """Declaration and example lines a deletion-only cleanup must preserve in order."""
+    protected = []
+    doctest_output = signature = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped in ('"""', "'''", "```"):
+            doctest_output = False
+            continue
+        example = bool(re.match(r"For\s+\w+\s*=", stripped))
+        if stripped.startswith((">>>", "...")):
+            example = doctest_output = True
+        elif doctest_output:
+            example = True
+            doctest_output = False
+        if re.match(r"(?:async\s+)?def\s+\w+\s*\(", stripped):
+            signature = True
+        if example or signature:
+            protected.append(stripped)
+        if signature and stripped.endswith(":"):
+            signature = False
+    return protected
+
+
+def accept_deletion(original: str, new: str | None, names) -> str | None:
+    """The cleaned text, or None unless it is a pure deletion of at most half the prose that keeps
+    every doctest line, every function definition and every name the requirement defines."""
+    if new is None or not new.strip() or new.strip() == original.strip():
+        return None
+    deleted = 0
+    matcher = difflib.SequenceMatcher(a=original, b=new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "delete":
+            deleted += i2 - i1
+        elif tag in ("replace", "insert") and (original[i1:i2].strip() or new[j1:j2].strip()):
+            return None
+    if deleted > 0.5 * len(original) or original.count(">>>") != new.count(">>>"):
+        return None
+    remaining = iter(line.strip() for line in new.splitlines())
+    for protected in protected_requirement_lines(original):
+        if not any(line == protected for line in remaining):
+            return None
+    for name in names:
+        if name and any(
+            pair not in parse_examples(new, name) for pair in parse_examples(original, name)
+        ):
+            return None
+    for defined in re.findall(r"def\s+([A-Za-z_]\w*)\s*\(", original):
+        if not re.search(r"def\s+" + re.escape(defined) + r"\s*\(", new):
+            return None
+    for name in names:
+        if not name:  # the requirement may declare no function
+            continue
+        pattern = r"\b" + re.escape(name) + r"\b"
+        if re.search(pattern, original) and not re.search(pattern, new):
+            return None
+    return new
+
+
 class CrossCheckClarification(ClarificationAlgorithmBase):
     DEFAULT_CONFIG = {
         "drafts": 3,  # first implementations, written before asking
@@ -659,6 +747,9 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
         # an example all of them contradict is one the answer overrides (or a corrupted one),
         # and repairing toward it would undo the answer.
         "check_filter": True,
+        # Delete a sentence that cannot hold together with the rest before drafting; the edit is
+        # kept only if it is a pure deletion (examples, signature and names untouched).
+        "preclean": True,
     }
 
     # LLM / sandbox helpers --------------------------------------------------------------
@@ -812,6 +903,14 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
 
     def run(self, env, problem):
         prompt, entry = problem["prompt"], problem["entry_point"]
+        if self.config["preclean"]:
+            # The user still sees the original text; only our own steps read the cleaned one.
+            try:
+                reply = self.ask_llm(env, PRECLEAN_PROMPT.format(entry=entry, prompt=prompt))
+                names = [entry, declared_name(prompt, entry)]
+                prompt = accept_deletion(prompt, edited(reply), names) or prompt
+            except Exception:  # cleaning is optional: degrade to the original text, never crash
+                pass
         declared = declared_name(prompt, entry)
         has_signature = declared is not None
         rules = RULES.format(entry=entry, signature_rule="" if has_signature else SIGNATURE_RULE)
