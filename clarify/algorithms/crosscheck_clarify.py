@@ -16,6 +16,11 @@ implementations are then written with the answer. Stated examples and calls the 
 settles become checks, except a check that no final satisfies (the answer overrides it);
 checks select the final, drive repair and gate an answer-compliance pass, and execution
 agreement on the probes breaks ties.
+With a second clarification turn available (run with --max_clarification_turns 2), one more
+question is asked only when the answer corrected the assumed contract (majority of three
+classifications). It targets the point the implementation is now most likely to get wrong, and
+the final implementations, checks, selection, repair and answer-compliance pass are rerun with
+both answers. With one turn the behaviour is exactly the single-question version.
 
 Team: STIL-ETS
 Team Members: Khalid Tounoussi, Issam Oukhay
@@ -219,6 +224,79 @@ Implementation of `{entry}`:
 Check the implementation against the user's answer, which overrides the requirement text where
 they conflict. If it follows the answer completely, reply with exactly OK. Otherwise reply with a
 corrected implementation that follows the answer (change nothing else) in one ```python block."""
+
+QUESTION2_PROMPT = """You are about to deliver an implementation of `{entry}` for this requirement:
+
+<requirement>
+{prompt}
+</requirement>
+
+You already asked the user one question:
+Q: {question}
+A: {answer}
+
+Your implementation, which follows that answer:
+```python
+{code}
+```
+
+Evidence from running your implementations:
+{evidence}
+
+You may ask the user ONE more question before delivering. It must be about a different point
+than the first question: do not repeat, rephrase or narrow it, and do not ask about anything the
+answer already settles. Use it to let the user correct your implementation where it is now most
+likely wrong, leading with the part the requirement and the answer still leave most open: an
+argument shape or result format the answer did not cover, a detail of the core rule, or what a
+stated example means. State concretely what your implementation assumes on that one point, with
+one example call and its output. Then ask whether that is right, or whether it should instead
+<the most plausible alternative>. Do not ask about empty, zero, negative or invalid input unless
+nothing else is open. Never ask for code or tests. Write plain text on one line, without code
+formatting or backticks. Reply with the question only."""
+
+FINAL2_PROMPT = """Implement this requirement in Python.
+
+<requirement>
+{prompt}
+</requirement>
+
+You asked the user two clarifying questions:
+Q: {question}
+A: {answer}
+Q: {question2}
+A: {answer2}
+
+The answers are authoritative for what they address, even where they contradict the text or a
+stated example. For everything they do not address, follow the requirement text, its stated
+examples, and the function name.
+
+{rules}
+
+Return only one ```python block."""
+
+# Logged only (the pilot always asks); a candidate gate for when a second question is worth its cost.
+GATE_PROMPT = """A requirement for the Python function `{entry}` and a clarifying question the user answered:
+
+<requirement>
+{prompt}
+</requirement>
+
+Q: {question}
+A: {answer}
+
+After this answer, is some point still unclear that would change what `{entry}` returns on
+ordinary inputs (not empty, invalid or extreme ones)? Reply with exactly one word: YES or NO."""
+
+# Did the answer confirm, correct or add to the assumption stated in the question?
+NEED_PROMPT = """A developer asked a user a clarifying question that states the developer's assumption, and the user answered.
+
+Q: {question}
+A: {answer}
+
+Classify the answer with exactly one word:
+CONFIRM - the answer agrees with the assumption and adds nothing that changes it
+CORRECT - the answer contradicts or changes at least one part of the assumption
+ADD - the answer agrees but adds a requirement or detail that the assumption did not state"""
 
 PRECLEAN_PROMPT = """Below is a requirement for the Python function `{entry}`. Some requirements were edited
 after they were written and now contain one sentence or clause that cannot hold together with the
@@ -750,6 +828,14 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
         # Delete a sentence that cannot hold together with the rest before drafting; the edit is
         # kept only if it is a pure deletion (examples, signature and names untouched).
         "preclean": True,
+        # v1.16 candidate: one more question after the first answer when the run allows a second
+        # turn. "always" asks it; "off", or a one-turn limit, reproduces v1.14rc3 exactly.
+        # "gated" (v1.20) asks the second question only when a majority of three classifications
+        # says the first answer CORRECTED the assumption; "always" (= v1.16) asks it whenever a second
+        # turn exists and only logs that vote.
+        "second_question": "gated",
+        "second_question_start_limit": 100,  # seconds since the task started
+        "task_deadline": 250,  # seconds; bounds the second round below the 300 s SDK watchdog
     }
 
     # LLM / sandbox helpers --------------------------------------------------------------
@@ -757,7 +843,7 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
     def ask_llm(self, env, prompt: str) -> str:
         return self.parallel(env, [prompt])[0]
 
-    def parallel(self, env, prompts: list[str]) -> list[str]:
+    def parallel(self, env, prompts: list[str], timeout: float | None = None) -> list[str]:
         """Run LLM calls concurrently; a call that has not returned by the deadline counts as
         empty, so one hung request cannot stall the task past the runner's watchdog."""
         results = [""] * len(prompts)
@@ -773,7 +859,9 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
         threads = [
             threading.Thread(target=call, args=(i, p), daemon=True) for i, p in enumerate(prompts)
         ]
-        deadline = time.monotonic() + float(self.config["llm_timeout"])
+        deadline = time.monotonic() + float(
+            self.config["llm_timeout"] if timeout is None else timeout
+        )
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -902,6 +990,7 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
     # Main --------------------------------------------------------------------------------
 
     def run(self, env, problem):
+        started = time.monotonic()
         prompt, entry = problem["prompt"], problem["entry_point"]
         if self.config["preclean"]:
             # The user still sees the original text; only our own steps read the cleaned one.
@@ -1012,16 +1101,76 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
             code, _ = self.pick(drafts, rows) if drafts else (best, None)
             return "```python\n" + self.finish(code, entry) + "\n```"
 
-        # 4. Final implementations and trusted checks, in parallel.
-        n = max(1, int(self.config["finals"]))
+        # 4-5. Final implementations, trusted checks, selection, repair and verify.
         final_prompt = FINAL_PROMPT.format(
             prompt=prompt, question=question, answer=answer, rules=rules
         )
+        context = f"\nThe user clarified:\nQ: {question}\nA: {answer}\n"
+        code, finals, calls = self.post_answer(
+            env,
+            prompt,
+            entry,
+            declared,
+            rules,
+            examples,
+            explained,
+            calls,
+            best,
+            final_prompt,
+            question,
+            answer,
+            context,
+        )
+        delivered = self.finish(code, entry)
+        note = getattr(env, "note", None)  # local logging only; the SDK environment has none
+        if note:
+            note("k1_delivered", delivered)
+        second = self.second_round(
+            env,
+            started,
+            note,
+            prompt,
+            entry,
+            declared,
+            rules,
+            examples,
+            explained,
+            calls,
+            finals,
+            code,
+            question,
+            answer,
+        )
+        return "```python\n" + (second or delivered) + "\n```"
+
+    def post_answer(
+        self,
+        env,
+        prompt,
+        entry,
+        declared,
+        rules,
+        examples,
+        explained,
+        calls,
+        best,
+        final_prompt,
+        question,
+        answer,
+        context,
+        deadline=None,
+    ):
+        """Finals, trusted checks and probes in parallel; select; repair; verify. Returns the
+        chosen code (unfinished), the finals and the probe calls. Without a deadline this is
+        exactly the v1.14rc3 post-answer stage."""
+        n = max(1, int(self.config["finals"]))
         numbered = (
             "\n".join(f"{i + 1}. {entry}{a} -> {e}" for i, (a, e) in enumerate(examples))
             or "(none)"
         )
-        context = f"\nThe user clarified:\nQ: {question}\nA: {answer}\n"
+        timeout = None
+        if deadline is not None:
+            timeout = max(5.0, min(float(self.config["llm_timeout"]), deadline - time.monotonic()))
         outputs = self.parallel(
             env,
             [final_prompt] * n
@@ -1031,6 +1180,7 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
                 ),
                 self.probe_prompt(prompt, entry, signature_of(best, entry), context),
             ],
+            timeout,
         )
         finals = [sanitize(c) for c in (extract_code(r, entry, declared) for r in outputs[:n]) if c]
         checks = self.trusted_checks(outputs[n], examples, explained)
@@ -1039,9 +1189,11 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
             finals = [best]
         code, results, checks = self.select(env, finals, entry, calls, checks)
 
-        # 5. Counterexample-guided repair against the trusted checks.
+        # Counterexample-guided repair against the trusted checks.
         for _ in range(int(self.config["repairs"]) if checks else 0):
             if results is None:
+                break
+            if deadline is not None and time.monotonic() > deadline - 100:
                 break
             failures = [
                 f"- {entry}{a} should return {e}, got {check[1]}"
@@ -1074,9 +1226,129 @@ class CrossCheckClarification(ClarificationAlgorithmBase):
                 break
             code, results = repaired, rows[0]["checks"]
 
-        if self.config["verify"]:
+        if self.config["verify"] and (deadline is None or time.monotonic() < deadline - 100):
             code = self.verify(env, prompt, entry, question, answer, code, checks, results)
-        return "```python\n" + self.finish(code, entry) + "\n```"
+        return code, finals, calls
+
+    def classify(self, env, question, answer):
+        """Majority of three samples: CONFIRM, CORRECT or ADD; None without a majority."""
+        replies = self.parallel(
+            env, [NEED_PROMPT.format(question=question, answer=answer)] * 3, 30.0
+        )
+        labels = [
+            next(
+                (
+                    w
+                    for w in ("CONFIRM", "CORRECT", "ADD")
+                    if (r or "").strip().upper().startswith(w)
+                ),
+                None,
+            )
+            for r in replies
+        ]
+        counts = {w: labels.count(w) for w in ("CONFIRM", "CORRECT", "ADD")}
+        best = max(counts, key=counts.get)
+        return (best if counts[best] >= 2 else None), labels
+
+    def second_round(
+        self,
+        env,
+        started,
+        note,
+        prompt,
+        entry,
+        declared,
+        rules,
+        examples,
+        explained,
+        calls,
+        finals,
+        code,
+        question,
+        answer,
+    ):
+        """One more question about a different point, then the post-answer stage again with both
+        answers. Returns the finished code, or None to keep the one-question result."""
+        mode = self.config["second_question"]
+        if mode not in ("always", "gated") or not env.can_ask():
+            return None
+        if time.monotonic() - started > float(self.config["second_question_start_limit"]):
+            if note:
+                note("skip", "time")
+            return None
+        verdict, votes = self.classify(env, question, answer)
+        if note:
+            note("need", votes)
+        if mode == "gated" and verdict != "CORRECT":
+            return None
+        deadline = started + float(self.config["task_deadline"])
+        rows = self.run_harness(
+            env, [self.finish(f, entry) for f in finals], entry, calls, examples
+        )
+        evidence = self.describe(rows, finals, entry, calls, examples)
+        for old, new in (
+            ("Drafts", "Implementations"),
+            ("drafts", "implementations"),
+            ("draft", "implementation"),
+        ):
+            evidence = evidence.replace(old, new)
+        reply, gate = self.parallel(
+            env,
+            [
+                QUESTION2_PROMPT.format(
+                    entry=entry,
+                    prompt=prompt,
+                    question=question,
+                    answer=answer,
+                    code=code,
+                    evidence=evidence,
+                ),
+                GATE_PROMPT.format(entry=entry, prompt=prompt, question=question, answer=answer),
+            ],
+            60.0,
+        )
+        if note:
+            note("gate", gate)
+        question2 = plain_question(reply)
+        if question2 and not re.search(r"\b" + re.escape(entry) + r"\b", question2):
+            question2 = f"About {entry}: {question2}"
+        if not question2:
+            if note:
+                note("skip", "no question")
+            return None
+        try:
+            answer2 = env.ask_human(question2)
+        except Exception:
+            answer2 = None
+        if not answer2:
+            if note:
+                note("skip", "no answer")
+            return None
+        both = f"{answer}\nQ: {question2}\nA: {answer2}"
+        code2, _, _ = self.post_answer(
+            env,
+            prompt,
+            entry,
+            declared,
+            rules,
+            examples,
+            explained,
+            calls,
+            code,
+            FINAL2_PROMPT.format(
+                prompt=prompt,
+                question=question,
+                answer=answer,
+                question2=question2,
+                answer2=answer2,
+                rules=rules,
+            ),
+            question,
+            both,
+            f"\nThe user clarified:\nQ: {question}\nA: {both}\n",
+            deadline,
+        )
+        return self.finish(code2, entry)
 
     def verify(self, env, prompt, entry, question, answer, code, checks, results):
         reply = self.ask_llm(
